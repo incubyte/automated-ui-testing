@@ -7,6 +7,7 @@ import base64
 import os
 import subprocess
 import traceback
+import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -14,6 +15,7 @@ from functools import partial
 from pathlib import PosixPath
 from typing import cast
 from pathlib import Path
+from io import StringIO
 
 import httpx
 import streamlit as st
@@ -29,7 +31,7 @@ from computer_use_demo.loop import (
     PROVIDER_TO_DEFAULT_MODEL_NAME,
     APIProvider,
     sampling_loop,
-    save_dialogue,
+    running_test_cases,
 )
 
 from computer_use_demo.run_commands import run_commands
@@ -43,7 +45,7 @@ STREAMLIT_STYLE = """
     button[kind=header] {
         background-color: rgb(13, 50, 83);
         border: 1px solid rgb(13, 50, 83);
-        color: rgb(0, 0, 0);
+        color: rgb(255, 255, 255);
     }
      /* Hide the streamlit deploy button */
     .stAppDeployButton {
@@ -93,6 +95,8 @@ def setup_state():
         st.session_state.hide_images = False
     if "in_sampling_loop" not in st.session_state:
         st.session_state.in_sampling_loop = False
+    if "test_cases_uploaded" not in st.session_state:
+        st.session_state.test_cases_uploaded = False
 
 
 def _reset_model():
@@ -107,6 +111,7 @@ async def main():
 
     LOGO_URL_LARGE = Path(os.path.join(os.getcwd(), 'static_content', 'logo.svg'))
     LOGO_URL_SMALL = Path(os.path.join(os.getcwd(), 'static_content', 'logo_icon.png'))
+    TEST_CASE_FOLDER = Path(os.path.join(os.getcwd(), 'test_cases'))
 
     st.set_page_config(
         page_title="TestAid",
@@ -122,6 +127,11 @@ async def main():
     st.logo(LOGO_URL_LARGE, link="https://www.incubyte.co/", icon_image=LOGO_URL_SMALL,)
 
     st.title("Automate UI Testing")
+
+    if st.button("Clear Chat", type="primary"):
+        await _reset_chat()
+
+    chat, test_run, http_logs = st.tabs(["Create Test Case", "Run Test Cases", "HTTP Exchange Logs"])
 
     with st.sidebar:
         # Section 1: Setup Changes
@@ -168,47 +178,30 @@ async def main():
             st.checkbox("Hide screenshots", key="hide_images")
 
             if st.button("Reset Settings", type="primary"):
-                with st.spinner("Resetting..."):
-                    st.session_state.clear()
-                    setup_state()
-                    subprocess.run("pkill Xvfb; pkill tint2", shell=True)
-                    await asyncio.sleep(1) 
-                    subprocess.run("./start_all.sh", shell=True)
+                await _reset_chat()
 
-        # Section 2: Save Test Case
-        with st.expander("💾 Save Test Case", expanded=False):
-            save_folder = st.text_input("Enter folder name:", key="save_folder_name")
-            if st.button("Save Dialogue"):
-                if not save_folder:
-                    st.error("Please enter a folder name")
-                else:
-                    success, error = save_dialogue(
-                        st.session_state.messages,
-                        save_folder
-                    )
-                    if success:
-                        st.success(f"Saved to folder: {save_folder}")
-                    else:
-                        st.error(f"Error saving Test Case: {error}")
 
-        # Section 3: Run Test Case
-        with st.expander("▶️ Run Test Cases", expanded=False):
-            file_path = st.text_input(
-                "Test Case File Path",
-                value=str(Path("tool_commands.json").absolute()),
-                help="Path to JSON file containing commands to execute"
-            )
+        # Section 3: Upload Test Cases
+        with st.expander("▶️ Upload Test Cases", expanded=False):
+            test_cases = st.file_uploader("Upload Test Cases",  type=["json"], accept_multiple_files=True)
+            test_case_number = 1
+
+            for test_case in test_cases:
+                # To convert to a string based IO:
+                stringio = StringIO(test_case.getvalue().decode("utf-8"))
+
+                # To read file as string:
+                string_data = stringio.read()
+
+                test_file_name = f"TC_{test_case_number}_{test_case.name}"
+
+                ## write test case to a local file with name as test_case_number
+                with open(TEST_CASE_FOLDER / test_file_name, "w") as f:
+                    f.write(string_data)
+
+                test_case_number += 1
             
-            if st.button("Run Test Cases"):
-                if not os.path.exists(file_path):
-                    st.error(f"File not found: {file_path}")
-                else:
-                    try:
-                        asyncio.run(run_commands(file_path))
-                        st.success("Test Cases executed successfully")
-                    except Exception as e:
-                        st.error(f"Error executing test cases: {str(e)}")
-
+                        
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
             st.session_state.provider, st.session_state.api_key
@@ -218,10 +211,43 @@ async def main():
         else:
             st.session_state.auth_validated = True
 
-    chat, http_logs = st.tabs(["Chat", "HTTP Exchange Logs"])
     new_message = st.chat_input(
         "Type a UI test case to run..."
     )
+
+    with test_run:
+        ## get list of all the files in the test case folder and display them as table with a Run Button
+        test_cases = os.listdir(TEST_CASE_FOLDER)
+        test_cases = [test_case for test_case in test_cases if test_case.endswith('.json')]
+        test_cases.sort()
+        test_cases.insert(0, "Select All")
+        
+        ## display the test cases in a table
+        test_cases_to_run = st.multiselect("Select Test Cases to Run", test_cases)
+        
+        if "Select All" in test_cases_to_run:
+            test_cases_to_run = test_cases[1:]
+
+        test_case_results = []
+
+        if st.button("Run Test Cases", type="primary"):
+            for test_case_to_run in test_cases_to_run:
+                test_case_file = TEST_CASE_FOLDER / test_case_to_run
+                with open(test_case_file, "r") as f:
+                    test_case = json.load(f)
+                st.session_state.messages = test_case
+                st.session_state.messages = await _run_test_cases(st.session_state.messages, http_logs)
+                test_case_result_message = st.session_state.messages[-1].get("content")[0].get("text")
+                result = "Pass" if "PASSED" in test_case_result_message else "Fail"
+                ## store the test case results as a dict with test case name and results
+                test_case_results.append({"Name": test_case_to_run, "Result": result  ,"Message": test_case_result_message})
+
+        if test_case_results:
+            ## write the test case result to a file
+            with open(TEST_CASE_FOLDER / "test_case_results.json", "w") as f:
+                json.dump(test_case_results, f)
+            ## display the test case results as table   
+            st.table(test_case_results)
 
     with chat:
         # render past chats
@@ -268,25 +294,7 @@ async def main():
             # we don't have a user message to respond to, exit early
             return
 
-        with track_sampling_loop():
-            # run the agent sampling loop with the newest message
-            st.session_state.messages = await sampling_loop(
-                system_prompt_suffix=st.session_state.custom_system_prompt,
-                model=st.session_state.model,
-                provider=st.session_state.provider,
-                messages=st.session_state.messages,
-                output_callback=partial(_render_message, Sender.BOT),
-                tool_output_callback=partial(
-                    _tool_output_callback, tool_state=st.session_state.tools
-                ),
-                api_response_callback=partial(
-                    _api_response_callback,
-                    tab=http_logs,
-                    response_state=st.session_state.responses,
-                ),
-                api_key=st.session_state.api_key,
-                only_n_most_recent_images=st.session_state.only_n_most_recent_images,
-            )
+        st.session_state.messages = await _run_agent_sampling_loop(st.session_state.messages, http_logs)
 
 
 def maybe_add_interruption_blocks():
@@ -468,6 +476,71 @@ def _render_message(
                 raise Exception(f'Unexpected response type {message["type"]}')
         else:
             st.markdown(message)
+
+
+def _render_download_button(
+    data:str
+):
+   st.download_button(label='💾 Save Test Case', data=data, mime='application/json')
+
+
+async def _run_agent_sampling_loop(messages, http_logs):
+    with track_sampling_loop():
+        # run the agent sampling loop with the newest message
+        messages = await sampling_loop(
+            system_prompt_suffix=st.session_state.custom_system_prompt,
+            model=st.session_state.model,
+            provider=st.session_state.provider,
+            messages=messages,
+            output_callback=partial(_render_message, Sender.BOT),
+            tool_output_callback=partial(
+                _tool_output_callback, tool_state=st.session_state.tools
+            ),
+            api_response_callback=partial(
+                _api_response_callback,
+                tab=http_logs,
+                response_state=st.session_state.responses,
+            ),
+            api_key=st.session_state.api_key,
+            only_n_most_recent_images=st.session_state.only_n_most_recent_images,
+        )
+
+        _render_download_button(json.dumps(messages))
+    
+        return messages
+
+
+async def _run_test_cases(messages, http_logs):
+    with track_sampling_loop():
+        # run the agent sampling loop with the newest message
+        messages = await running_test_cases(
+            system_prompt_suffix=st.session_state.custom_system_prompt,
+            model=st.session_state.model,
+            provider=st.session_state.provider,
+            messages=messages,
+            output_callback=partial(_render_message, Sender.BOT),
+            tool_output_callback=partial(
+                _tool_output_callback, tool_state=st.session_state.tools
+            ),
+            api_response_callback=partial(
+                _api_response_callback,
+                tab=http_logs,
+                response_state=st.session_state.responses,
+            ),
+            api_key=st.session_state.api_key,
+            only_n_most_recent_images=st.session_state.only_n_most_recent_images,
+        )
+
+        # _render_download_button(json.dumps(messages))
+    
+        return messages
+
+
+async def _reset_chat():
+    with st.spinner("Resetting..."):
+        st.session_state.clear()
+        setup_state()
+        await asyncio.sleep(1) 
 
 
 if __name__ == "__main__":

@@ -75,6 +75,7 @@ SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
 <IMPORTANT>
 * When using Firefox, if a startup wizard appears, IGNORE IT.  Do not even click "skip this step".  Instead, click on the address bar where it says "Search or enter address", and enter the appropriate search term or URL there.
 * If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
+* If you are asked to run a test case, at the end of the test please respond with the result of the test case as either PASSED or FAILED only.
 </IMPORTANT>"""
 
 
@@ -331,19 +332,7 @@ def save_dialogue(messages, save_folder: str):
             json.dump(messages, f, indent=2)
             
         # Extract and save tool commands
-        tool_commands = []
-        for message in messages:
-            if message["role"] == "assistant":
-                content = message["content"]
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tool_commands.append({
-                                "name": block.get("name"),
-                                "input": block.get("input"),
-                                "id": block.get("id"),
-                                "type": block.get("type")
-                            })
+        tool_commands = extract_tool_commands(messages=messages)
 
         # Save tool commands
         tools_commands_path = folder_path / "tool_commands.json"
@@ -357,3 +346,179 @@ def save_dialogue(messages, save_folder: str):
     except Exception as e:
         logger.error(f"Error in save_dialogue: {str(e)}", exc_info=True)
         return False, str(e)
+
+
+def extract_tool_commands(messages):
+    """Save dialogue and tool commands to specified folder"""
+    # Extract and save tool commands
+    tool_commands = []
+    for message in messages:
+        if message["role"] == "assistant":
+            content = message["content"]
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_commands.append({
+                            "name": block.get("name"),
+                            "input": block.get("input"),
+                            "id": block.get("id"),
+                            "type": block.get("type")
+                        })
+
+    return tool_commands
+
+
+async def running_test_cases(
+    *,
+    model: str,
+    provider: APIProvider,
+    system_prompt_suffix: str,
+    messages: list[BetaMessageParam],
+    output_callback: Callable[[BetaContentBlockParam], None],
+    tool_output_callback: Callable[[ToolResult, str], None],
+    api_response_callback: Callable[
+        [httpx.Request, httpx.Response | object | None, Exception | None], None
+    ],
+    api_key: str,
+    only_n_most_recent_images: int | None = None,
+    max_tokens: int = 4096,
+):
+    """
+    Agentic sampling loop for the assistant/tool interaction of computer use.
+    """
+    tool_collection = ToolCollection(
+        ComputerTool(),
+        BashTool(),
+        EditTool(),
+    )
+    system = BetaTextBlockParam(
+        type="text",
+        text=f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}",
+    )
+
+    _remove_last_user_message_and_response(messages)
+
+    await _execute_tool_use_blocks(messages, output_callback, tool_output_callback, tool_collection)
+
+    while True:
+        enable_prompt_caching = False
+        betas = [COMPUTER_USE_BETA_FLAG]
+        image_truncation_threshold = only_n_most_recent_images or 0
+        if provider == APIProvider.ANTHROPIC:
+            client = Anthropic(api_key=api_key, max_retries=4)
+            enable_prompt_caching = True
+        elif provider == APIProvider.VERTEX:
+            client = AnthropicVertex()
+        elif provider == APIProvider.BEDROCK:
+            client = AnthropicBedrock()
+
+        if enable_prompt_caching:
+            betas.append(PROMPT_CACHING_BETA_FLAG)
+            _inject_prompt_caching(messages)
+            # Because cached reads are 10% of the price, we don't think it's
+            # ever sensible to break the cache by truncating images
+            only_n_most_recent_images = 0
+            system["cache_control"] = {"type": "ephemeral"}
+
+        if only_n_most_recent_images:
+            _maybe_filter_to_n_most_recent_images(
+                messages,
+                only_n_most_recent_images,
+                min_removal_threshold=image_truncation_threshold,
+            )
+
+
+        # Call the API
+        # we use raw_response to provide debug information to streamlit. Your
+        # implementation may be able call the SDK directly with:
+        # `response = client.messages.create(...)` instead.
+        try:
+            raw_response = client.beta.messages.with_raw_response.create(
+                max_tokens=max_tokens,
+                messages=messages,
+                model=model,
+                system=[system],
+                tools=tool_collection.to_params(),
+                betas=betas,
+            )
+        except (APIStatusError, APIResponseValidationError) as e:
+            api_response_callback(e.request, e.response, e)
+            return messages
+        except APIError as e:
+            api_response_callback(e.request, e.body, e)
+            return messages
+
+        api_response_callback(
+            raw_response.http_response.request, raw_response.http_response, None
+        )
+
+        response = raw_response.parse()
+
+        response_params = _response_to_params(response)
+        messages.append(
+            {
+                "role": "assistant",
+                "content": response_params,
+            }
+        )
+
+        tool_result_content: list[BetaToolResultBlockParam] = []
+        for content_block in response_params:
+            output_callback(content_block)
+            if content_block["type"] == "tool_use":
+                result = await tool_collection.run(
+                    name=content_block["name"],
+                    tool_input=cast(dict[str, Any], content_block["input"]),
+                )
+                tool_result_content.append(
+                    _make_api_tool_result(result, content_block["id"])
+                )
+                tool_output_callback(result, content_block["id"])
+
+        if not tool_result_content:
+            return messages
+
+        messages.append({"content": tool_result_content, "role": "user"})
+
+
+async def _execute_tool_use_blocks(messages, output_callback, tool_output_callback, tool_collection):
+    tool_result_content: list[BetaToolResultBlockParam] = []
+    for message in messages:
+        if message["role"] == "assistant":
+            content = message["content"]
+            if isinstance(content, list):
+                tool_result_content: list[BetaToolResultBlockParam] = []
+                for content_block in content:
+                    output_callback(content_block)
+                    if content_block["type"] == "tool_use":
+                        logger.info(f"Running tool command: {content_block['name']} with input: {content_block['input']}")
+                        result = await tool_collection.run(
+                            name=content_block["name"],
+                            tool_input=cast(dict[str, Any], content_block["input"]),
+                        )
+                        tool_result_content.append(
+                            _make_api_tool_result(result, content_block["id"])
+                        )
+                        tool_output_callback(result, content_block["id"])
+
+    logger.info("Tool use blocks executed successfully with the following results:")
+    # logger.info(tool_result_content)    
+    messages.append({"content": tool_result_content, "role": "user"})
+
+
+def _remove_last_user_message_and_response(messages):
+    """
+    Remove the last user message and response from the dialogue.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            messages.pop(i)
+            break
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "assistant":
+            messages.pop(i)
+            break
+
+    ### Save messages to file
+    with open("messages_after_removal.json", "w") as f:
+        json.dump(messages, f, indent=2)
