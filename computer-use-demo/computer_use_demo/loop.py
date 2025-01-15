@@ -2,11 +2,19 @@
 Agentic sampling loop that calls the Anthropic API and local implementation of anthropic-defined computer use tools.
 """
 
+from pathlib import Path
+import json
+import os
 import platform
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, cast
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 import httpx
 from anthropic import (
@@ -56,7 +64,7 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
 * You are utilising an Ubuntu virtual machine using {platform.machine()} architecture with internet access.
 * You can feel free to install Ubuntu applications with your bash tool. Use curl instead of wget.
-* To open firefox, please just click on the firefox icon.  Note, firefox-esr is what is installed on your system.
+* Firefox browser will be open by default when you start. Note, firefox-esr is what is installed on your system.
 * Using bash tool you can start GUI applications, but you need to set export DISPLAY=:1 and use a subshell. For example "(DISPLAY=:1 xterm &)". GUI apps run with bash tool will appear within your desktop environment, but they may take some time to appear. Take a screenshot to confirm it did.
 * When using your bash tool with commands that are expected to output very large quantities of text, redirect into a tmp file and use str_replace_editor or `grep -n -B <lines before> -A <lines after> <query> <filename>` to confirm output.
 * When viewing a page it can be helpful to zoom out so that you can see everything on the page.  Either that, or make sure you scroll down to see everything before deciding something isn't available.
@@ -303,3 +311,49 @@ def _maybe_prepend_system_tool_result(result: ToolResult, result_text: str):
     if result.system:
         result_text = f"<system>{result.system}</system>\n{result_text}"
     return result_text
+
+
+def save_dialogue(messages, save_folder: str):
+    """Save dialogue and tool commands to specified folder"""
+    try:
+        logger.info(f"Starting save_dialogue with folder: {save_folder}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        
+        # Create folder
+        folder_path = Path(os.path.join(os.getcwd(), save_folder))
+        logger.info(f"Creating folder at: {folder_path}")
+        folder_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save dialogue
+        dialogue_path = folder_path / "dialogue.json"
+        logger.info(f"Saving dialogue to: {dialogue_path}")
+        with open(dialogue_path, 'w', encoding='utf-8') as f:
+            json.dump(messages, f, indent=2)
+            
+        # Extract and save tool commands
+        tool_commands = []
+        for message in messages:
+            if message["role"] == "assistant":
+                content = message["content"]
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tool_commands.append({
+                                "name": block.get("name"),
+                                "input": block.get("input"),
+                                "id": block.get("id"),
+                                "type": block.get("type")
+                            })
+
+        # Save tool commands
+        tools_commands_path = folder_path / "tool_commands.json"
+        logger.info(f"Saving tool commands to: {tools_commands_path}")
+        with open(tools_commands_path, 'w', encoding='utf-8') as f:
+            json.dump(tool_commands, f, indent=2)
+        
+        logger.info("Save operation completed successfully")
+        return True, None
+        
+    except Exception as e:
+        logger.error(f"Error in save_dialogue: {str(e)}", exc_info=True)
+        return False, str(e)

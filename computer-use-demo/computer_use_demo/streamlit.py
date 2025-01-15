@@ -13,6 +13,7 @@ from enum import StrEnum
 from functools import partial
 from pathlib import PosixPath
 from typing import cast
+from pathlib import Path
 
 import httpx
 import streamlit as st
@@ -28,7 +29,10 @@ from computer_use_demo.loop import (
     PROVIDER_TO_DEFAULT_MODEL_NAME,
     APIProvider,
     sampling_loop,
+    save_dialogue,
 )
+
+from computer_use_demo.run_commands import run_commands
 from computer_use_demo.tools import ToolResult
 
 CONFIG_DIR = PosixPath("~/.anthropic").expanduser()
@@ -37,12 +41,9 @@ STREAMLIT_STYLE = """
 <style>
     /* Highlight the stop button in red */
     button[kind=header] {
-        background-color: rgb(255, 75, 75);
-        border: 1px solid rgb(255, 75, 75);
-        color: rgb(255, 255, 255);
-    }
-    button[kind=header]:hover {
-        background-color: rgb(255, 51, 51);
+        background-color: rgb(13, 50, 83);
+        border: 1px solid rgb(13, 50, 83);
+        color: rgb(0, 0, 0);
     }
      /* Hide the streamlit deploy button */
     .stAppDeployButton {
@@ -104,64 +105,109 @@ async def main():
     """Render loop for streamlit"""
     setup_state()
 
+    LOGO_URL_LARGE = Path(os.path.join(os.getcwd(), 'static_content', 'logo.svg'))
+    LOGO_URL_SMALL = Path(os.path.join(os.getcwd(), 'static_content', 'logo_icon.png'))
+
+    st.set_page_config(
+        page_title="TestAid",
+        page_icon=LOGO_URL_SMALL,
+        menu_items={
+            'Get Help': 'https://www.incubyte.co/contact-us',
+            'About': "### Automate UI Testing\n\n This tool is designed to help you automate UI testing. It uses the Anthropic API to generate test cases based on your input.\n\nMade by Incubyte.\n\n",
+        }
+    )
+
     st.markdown(STREAMLIT_STYLE, unsafe_allow_html=True)
 
-    st.title("Claude Computer Use Demo")
+    st.logo(LOGO_URL_LARGE, link="https://www.incubyte.co/", icon_image=LOGO_URL_SMALL,)
 
-    if not os.getenv("HIDE_WARNING", False):
-        st.warning(WARNING_TEXT)
+    st.title("Automate UI Testing")
 
     with st.sidebar:
-
-        def _reset_api_provider():
-            if st.session_state.provider_radio != st.session_state.provider:
-                _reset_model()
-                st.session_state.provider = st.session_state.provider_radio
-                st.session_state.auth_validated = False
-
-        provider_options = [option.value for option in APIProvider]
-        st.radio(
-            "API Provider",
-            options=provider_options,
-            key="provider_radio",
-            format_func=lambda x: x.title(),
-            on_change=_reset_api_provider,
-        )
-
-        st.text_input("Model", key="model")
-
-        if st.session_state.provider == APIProvider.ANTHROPIC:
-            st.text_input(
-                "Anthropic API Key",
-                type="password",
-                key="api_key",
-                on_change=lambda: save_to_storage("api_key", st.session_state.api_key),
+        # Section 1: Setup Changes
+        with st.expander("⚙️ Setup", expanded=False):
+            def _reset_api_provider():
+                if st.session_state.provider_radio != st.session_state.provider:
+                    _reset_model()
+                    st.session_state.provider = st.session_state.provider_radio
+                    st.session_state.auth_validated = False
+                    
+            provider_options = [option.value for option in APIProvider]
+            st.radio(
+                "API Provider",
+                options=provider_options,
+                key="provider_radio", 
+                format_func=lambda x: x.title(),
+                on_change=_reset_api_provider,
             )
 
-        st.number_input(
-            "Only send N most recent images",
-            min_value=0,
-            key="only_n_most_recent_images",
-            help="To decrease the total tokens sent, remove older screenshots from the conversation",
-        )
-        st.text_area(
-            "Custom System Prompt Suffix",
-            key="custom_system_prompt",
-            help="Additional instructions to append to the system prompt. see computer_use_demo/loop.py for the base system prompt.",
-            on_change=lambda: save_to_storage(
-                "system_prompt", st.session_state.custom_system_prompt
-            ),
-        )
-        st.checkbox("Hide screenshots", key="hide_images")
+            st.text_input("Model", key="model")
 
-        if st.button("Reset", type="primary"):
-            with st.spinner("Resetting..."):
-                st.session_state.clear()
-                setup_state()
+            if st.session_state.provider == APIProvider.ANTHROPIC:
+                st.text_input(
+                    "Anthropic API Key",
+                    type="password",
+                    key="api_key",
+                    on_change=lambda: save_to_storage("api_key", st.session_state.api_key),
+                )
 
-                subprocess.run("pkill Xvfb; pkill tint2", shell=True)  # noqa: ASYNC221
-                await asyncio.sleep(1)
-                subprocess.run("./start_all.sh", shell=True)  # noqa: ASYNC221
+            st.number_input(
+                "Only send N most recent images",
+                min_value=0,
+                key="only_n_most_recent_images", 
+                help="To decrease total tokens sent, remove older screenshots"
+            )
+
+            st.text_area(
+                "Custom System Prompt Suffix",
+                key="custom_system_prompt",
+                help="Additional instructions to append to system prompt",
+                on_change=lambda: save_to_storage("system_prompt", st.session_state.custom_system_prompt),
+            )
+
+            st.checkbox("Hide screenshots", key="hide_images")
+
+            if st.button("Reset Settings", type="primary"):
+                with st.spinner("Resetting..."):
+                    st.session_state.clear()
+                    setup_state()
+                    subprocess.run("pkill Xvfb; pkill tint2", shell=True)
+                    await asyncio.sleep(1) 
+                    subprocess.run("./start_all.sh", shell=True)
+
+        # Section 2: Save Test Case
+        with st.expander("💾 Save Test Case", expanded=False):
+            save_folder = st.text_input("Enter folder name:", key="save_folder_name")
+            if st.button("Save Dialogue"):
+                if not save_folder:
+                    st.error("Please enter a folder name")
+                else:
+                    success, error = save_dialogue(
+                        st.session_state.messages,
+                        save_folder
+                    )
+                    if success:
+                        st.success(f"Saved to folder: {save_folder}")
+                    else:
+                        st.error(f"Error saving Test Case: {error}")
+
+        # Section 3: Run Test Case
+        with st.expander("▶️ Run Test Cases", expanded=False):
+            file_path = st.text_input(
+                "Test Case File Path",
+                value=str(Path("tool_commands.json").absolute()),
+                help="Path to JSON file containing commands to execute"
+            )
+            
+            if st.button("Run Test Cases"):
+                if not os.path.exists(file_path):
+                    st.error(f"File not found: {file_path}")
+                else:
+                    try:
+                        asyncio.run(run_commands(file_path))
+                        st.success("Test Cases executed successfully")
+                    except Exception as e:
+                        st.error(f"Error executing test cases: {str(e)}")
 
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
@@ -174,7 +220,7 @@ async def main():
 
     chat, http_logs = st.tabs(["Chat", "HTTP Exchange Logs"])
     new_message = st.chat_input(
-        "Type a message to send to Claude to control the computer..."
+        "Type a UI test case to run..."
     )
 
     with chat:
