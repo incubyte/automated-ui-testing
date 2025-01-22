@@ -8,6 +8,7 @@ import os
 import subprocess
 import traceback
 import json
+import pandas as pd
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -267,11 +268,9 @@ async def main():
             with open(TEST_RESULT_FOLDER / test_result_file, "w") as f:
                 json.dump(test_case_results, f)
             
-            ## write the test case result to a csv file
-            with open(TEST_RESULT_FOLDER / test_result_file.replace('.json', 'csv'), "w") as f:
-                f.write("Name,Result,Message\n")
-                for test_case_result in test_case_results:
-                    f.write(f"{test_case_result.get('Name')},{test_case_result.get('Result')},{test_case_result.get('Message')}\n")
+            ## write the test case result to a csv file            
+            df = pd.DataFrame(test_case_results) 
+            df.to_csv(TEST_RESULT_FOLDER / test_result_file.replace('.json', '.csv'), index=False)
 
             ## display the test case results as table   
             st.table(test_case_results)
