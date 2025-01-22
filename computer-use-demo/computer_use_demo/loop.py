@@ -16,6 +16,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+LOCAL_MOUNT_PATH = "/home/docker_mount"
+TEST_CASE_FOLDER = Path(os.path.join(LOCAL_MOUNT_PATH, 'test_cases'))
+
 import httpx
 from anthropic import (
     Anthropic,
@@ -255,12 +258,13 @@ def _inject_prompt_caching(
     Set cache breakpoints for the 3 most recent turns
     one cache breakpoint is left for tools/system prompt, to be shared across sessions
     """
-
+    # logger.info(f"Injecting cache control for messages: {messages}")
     breakpoints_remaining = 3
     for message in reversed(messages):
         if message["role"] == "user" and isinstance(
             content := message["content"], list
         ):
+            # logger.info(f"Injecting cache control for message contnent: {content}")
             if breakpoints_remaining:
                 breakpoints_remaining -= 1
                 content[-1]["cache_control"] = BetaCacheControlEphemeralParam(
@@ -314,37 +318,29 @@ def _maybe_prepend_system_tool_result(result: ToolResult, result_text: str):
     return result_text
 
 
-def save_dialogue(messages, save_folder: str):
-    """Save dialogue and tool commands to specified folder"""
+def save_test_case(messages, test_file_name: str):
+    """Save dialogue and test case to specified folder"""
     try:
-        logger.info(f"Starting save_dialogue with folder: {save_folder}")
-        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Saving test case at : {test_file_name}")
+        ## add _dialogue.json at the end of test__file_name
+        dialogue_file = test_file_name.replace(".json", "_dialogue.json")
         
-        # Create folder
-        folder_path = Path(os.path.join(os.getcwd(), save_folder))
-        logger.info(f"Creating folder at: {folder_path}")
-        folder_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save dialogue
-        dialogue_path = folder_path / "dialogue.json"
-        logger.info(f"Saving dialogue to: {dialogue_path}")
-        with open(dialogue_path, 'w', encoding='utf-8') as f:
+        with open(TEST_CASE_FOLDER / dialogue_file, 'w', encoding='utf-8') as f:
             json.dump(messages, f, indent=2)
-            
-        # Extract and save tool commands
-        tool_commands = extract_tool_commands(messages=messages)
-
-        # Save tool commands
-        tools_commands_path = folder_path / "tool_commands.json"
-        logger.info(f"Saving tool commands to: {tools_commands_path}")
-        with open(tools_commands_path, 'w', encoding='utf-8') as f:
-            json.dump(tool_commands, f, indent=2)
         
-        logger.info("Save operation completed successfully")
+        # logger.info("Dialogue saved successfully")
+
+        ## Extract and save test case
+        test_case = extract_test_case(messages)
+
+        with open(TEST_CASE_FOLDER / test_file_name, 'w', encoding='utf-8') as f:
+            json.dump(test_case, f, indent=2)
+
+        # logger.info("Save operation completed successfully")
         return True, None
         
     except Exception as e:
-        logger.error(f"Error in save_dialogue: {str(e)}", exc_info=True)
+        logger.error(f"Error in saving test case: {str(e)}", exc_info=True)
         return False, str(e)
 
 
@@ -366,6 +362,19 @@ def extract_tool_commands(messages):
                         })
 
     return tool_commands
+
+
+def extract_test_case(messages):
+    """Save dialogue and tool commands to specified folder"""
+    # Extract and save tool commands
+    test_case = []
+
+    test_case.append({
+        "role": "user",
+        "content": messages[-1]["content"]
+    })
+
+    return test_case
 
 
 async def running_test_cases(
@@ -502,14 +511,20 @@ async def _execute_tool_use_blocks(messages, output_callback, tool_output_callba
                         tool_output_callback(result, content_block["id"])
 
     logger.info("Tool use blocks executed successfully with the following results:")
-    # logger.info(tool_result_content)    
-    messages.append({"content": tool_result_content, "role": "user"})
+    # logger.info(tool_result_content)   
+    if len(tool_result_content) > 0:
+        messages.append({"content": tool_result_content, "role": "user"})
 
 
 def _remove_last_user_message_and_response(messages):
     """
     Remove the last user message and response from the dialogue.
     """
+    # logger.info(f"Removing last user message and response from the dialogue {len(messages)}")
+    
+    if (len(messages) < 2):
+        return
+
     for i in range(len(messages) - 1, -1, -1):
         if messages[i]["role"] == "user":
             messages.pop(i)

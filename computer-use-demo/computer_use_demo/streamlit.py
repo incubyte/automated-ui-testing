@@ -16,6 +16,11 @@ from pathlib import PosixPath
 from typing import cast
 from pathlib import Path
 from io import StringIO
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 import httpx
 import streamlit as st
@@ -32,11 +37,13 @@ from computer_use_demo.loop import (
     APIProvider,
     sampling_loop,
     running_test_cases,
+    save_test_case,
 )
 
 from computer_use_demo.run_commands import run_commands
 from computer_use_demo.tools import ToolResult
 
+LOCAL_MOUNT_PATH = "/home/docker_mount"
 CONFIG_DIR = PosixPath("~/.anthropic").expanduser()
 API_KEY_FILE = CONFIG_DIR / "api_key"
 STREAMLIT_STYLE = """
@@ -57,6 +64,8 @@ STREAMLIT_STYLE = """
 WARNING_TEXT = "⚠️ Security Alert: Never provide access to sensitive accounts or data, as malicious web content can hijack Claude's behavior"
 INTERRUPT_TEXT = "(user stopped or interrupted and wrote the following)"
 INTERRUPT_TOOL_ERROR = "human stopped or interrupted tool execution"
+TEST_CASE_FOLDER = Path(os.path.join(LOCAL_MOUNT_PATH, 'test_cases'))
+TEST_RESULT_FOLDER = Path(os.path.join(LOCAL_MOUNT_PATH, 'results'))
 
 
 class Sender(StrEnum):
@@ -111,7 +120,6 @@ async def main():
 
     LOGO_URL_LARGE = Path(os.path.join(os.getcwd(), 'static_content', 'logo.svg'))
     LOGO_URL_SMALL = Path(os.path.join(os.getcwd(), 'static_content', 'logo_icon.png'))
-    TEST_CASE_FOLDER = Path(os.path.join(os.getcwd(), 'test_cases'))
 
     st.set_page_config(
         page_title="TestAid",
@@ -128,12 +136,13 @@ async def main():
 
     st.title("Automate UI Testing")
 
-    if st.button("Clear Chat", type="primary"):
-        await _reset_chat()
-
     chat, test_run, http_logs = st.tabs(["Create Test Case", "Run Test Cases", "HTTP Exchange Logs"])
 
     with st.sidebar:
+    
+        if st.button("Clear Chat", type="primary"):
+            await _reset_chat()
+    
         # Section 1: Setup Changes
         with st.expander("⚙️ Setup", expanded=False):
             def _reset_api_provider():
@@ -201,7 +210,7 @@ async def main():
 
                 test_case_number += 1
             
-                        
+             
     if not st.session_state.auth_validated:
         if auth_error := validate_auth(
             st.session_state.provider, st.session_state.api_key
@@ -218,7 +227,7 @@ async def main():
     with test_run:
         ## get list of all the files in the test case folder and display them as table with a Run Button
         test_cases = os.listdir(TEST_CASE_FOLDER)
-        test_cases = [test_case for test_case in test_cases if test_case.endswith('.json')]
+        test_cases = [test_case for test_case in test_cases if test_case.endswith('.json') and not test_case.endswith('_dialogue.json')]
         test_cases.sort()
         test_cases.insert(0, "Select All")
         
@@ -232,20 +241,33 @@ async def main():
 
         if st.button("Run Test Cases", type="primary"):
             for test_case_to_run in test_cases_to_run:
+
                 test_case_file = TEST_CASE_FOLDER / test_case_to_run
                 with open(test_case_file, "r") as f:
                     test_case = json.load(f)
-                st.session_state.messages = test_case
-                st.session_state.messages = await _run_test_cases(st.session_state.messages, http_logs)
+
+                st.session_state.messages = await _run_test_cases(test_case, http_logs)
+
                 test_case_result_message = st.session_state.messages[-1].get("content")[0].get("text")
                 result = "Pass" if "PASSED" in test_case_result_message else "Fail"
+
                 ## store the test case results as a dict with test case name and results
                 test_case_results.append({"Name": test_case_to_run, "Result": result  ,"Message": test_case_result_message})
 
         if test_case_results:
+            ## create a filename which has date and timestamp
+            test_result_file = f"test_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
             ## write the test case result to a file
-            with open(TEST_CASE_FOLDER / "test_case_results.json", "w") as f:
+            with open(TEST_RESULT_FOLDER / test_result_file, "w") as f:
                 json.dump(test_case_results, f)
+            
+            ## write the test case result to a csv file
+            with open(TEST_RESULT_FOLDER / test_result_file.replace('.json', 'csv'), "w") as f:
+                f.write("Name,Result,Message\n")
+                for test_case_result in test_case_results:
+                    f.write(f"{test_case_result.get('Name')},{test_case_result.get('Result')},{test_case_result.get('Message')}\n")
+
             ## display the test case results as table   
             st.table(test_case_results)
 
@@ -295,6 +317,8 @@ async def main():
             return
 
         st.session_state.messages = await _run_agent_sampling_loop(st.session_state.messages, http_logs)
+
+        _render_save_button(st.session_state.messages)
 
 
 def maybe_add_interruption_blocks():
@@ -504,14 +528,13 @@ async def _run_agent_sampling_loop(messages, http_logs):
             api_key=st.session_state.api_key,
             only_n_most_recent_images=st.session_state.only_n_most_recent_images,
         )
-
-        _render_download_button(json.dumps(messages))
     
         return messages
 
 
 async def _run_test_cases(messages, http_logs):
     with track_sampling_loop():
+        # logger.info(f"Running test cases {messages}")
         # run the agent sampling loop with the newest message
         messages = await running_test_cases(
             system_prompt_suffix=st.session_state.custom_system_prompt,
@@ -541,6 +564,20 @@ async def _reset_chat():
         st.session_state.clear()
         setup_state()
         await asyncio.sleep(1) 
+
+
+def _render_save_button(messages):
+    try:
+        if st.button("💾 Save Test Case", type="primary"):
+            test_case_name = st.text_input("Enter Test Case Name")
+            if len(test_case_name) > 0:
+                test_case_file = test_case_name + ".json"
+                logger.info(test_case_file);
+                save_test_case(messages, test_case_file)
+                st.success(f"Test Case saved as {test_case_file}")
+    except Exception as e:
+        st.error(f"Error saving test case: {e}")
+        
 
 
 if __name__ == "__main__":
