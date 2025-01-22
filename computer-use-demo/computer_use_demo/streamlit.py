@@ -209,6 +209,10 @@ async def main():
                     f.write(string_data)
 
                 test_case_number += 1
+
+        save_button_expander = st.expander("💾 Save Test Cases", expanded=False)
+        with save_button_expander:
+            _render_save_button(st.session_state.messages)
             
              
     if not st.session_state.auth_validated:
@@ -318,7 +322,8 @@ async def main():
 
         st.session_state.messages = await _run_agent_sampling_loop(st.session_state.messages, http_logs)
 
-        _render_save_button(st.session_state.messages)
+        save_button_expander.expanded = True
+
 
 
 def maybe_add_interruption_blocks():
@@ -567,9 +572,9 @@ async def _reset_chat():
 
 
 def _render_save_button(messages):
+    test_case_name = st.text_input("Enter Test Case Name")
     try:
-        if st.button("💾 Save Test Case", type="primary"):
-            test_case_name = st.text_input("Enter Test Case Name")
+        if st.button("💾 Save Test Case", type="primary"):            
             if len(test_case_name) > 0:
                 test_case_file = test_case_name + ".json"
                 logger.info(test_case_file);
