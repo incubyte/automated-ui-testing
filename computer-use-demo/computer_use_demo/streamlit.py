@@ -106,6 +106,8 @@ def setup_state():
         st.session_state.in_sampling_loop = False
     if "test_cases_uploaded" not in st.session_state:
         st.session_state.test_cases_uploaded = False
+    if "save_test_expanded" not in st.session_state:
+        st.session_state.save_test_expanded = False
 
 
 def _reset_model():
@@ -210,8 +212,7 @@ async def main():
 
                 test_case_number += 1
 
-        save_button_expander = st.expander("💾 Save Test Cases", expanded=False)
-        with save_button_expander:
+        with st.expander("💾 Save Test Cases", expanded=st.session_state.save_test_expanded):
             _render_save_button(st.session_state.messages)
             
              
@@ -322,7 +323,7 @@ async def main():
 
         st.session_state.messages = await _run_agent_sampling_loop(st.session_state.messages, http_logs)
 
-        save_button_expander.expanded = True
+        st.session_state.save_test_expanded = True
 
 
 
@@ -575,7 +576,7 @@ def _render_save_button(messages):
     test_case_name = st.text_input("Enter Test Case Name")
     try:
         if st.button("💾 Save Test Case", type="primary"):            
-            if len(test_case_name) > 0:
+            if len(test_case_name) > 0 and len(messages) > 0:
                 test_case_file = test_case_name + ".json"
                 logger.info(test_case_file);
                 save_test_case(messages, test_case_file)
