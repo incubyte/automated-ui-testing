@@ -31,10 +31,11 @@ async def test_loop():
     tool_output_callback = mock.Mock()
     api_response_callback = mock.Mock()
 
-    with mock.patch(
-        "computer_use_demo.loop.Anthropic", return_value=client
-    ), mock.patch(
-        "computer_use_demo.loop.ToolCollection", return_value=tool_collection
+    with (
+        mock.patch("computer_use_demo.loop.Anthropic", return_value=client),
+        mock.patch(
+            "computer_use_demo.loop.ToolCollection", return_value=tool_collection
+        ),
     ):
         messages: list[BetaMessageParam] = [{"role": "user", "content": "Test message"}]
         result = await sampling_loop(
@@ -46,6 +47,7 @@ async def test_loop():
             tool_output_callback=tool_output_callback,
             api_response_callback=api_response_callback,
             api_key="test-key",
+            tool_version="computer_use_20250124",
         )
 
         assert len(result) == 4
@@ -59,7 +61,7 @@ async def test_loop():
             name="computer", tool_input={"action": "test"}
         )
         output_callback.assert_called_with(
-            BetaTextBlockParam(text="Done!", type="text")
+            BetaTextBlockParam(text="Done!", type="text", citations=None)
         )
         assert output_callback.call_count == 3
         assert tool_output_callback.call_count == 1
