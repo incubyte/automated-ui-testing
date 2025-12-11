@@ -611,6 +611,7 @@ async def _run_agent_sampling_loop(messages, http_logs):
             ),
             api_key=st.session_state.api_key,
             only_n_most_recent_images=st.session_state.only_n_most_recent_images,
+            tool_version='computer_use_20250124',
         )
     
         return messages
