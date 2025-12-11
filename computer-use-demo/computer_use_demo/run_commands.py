@@ -1,6 +1,6 @@
 import json
 import asyncio
-from computer_use_demo.tools import ComputerTool, BashTool
+from computer_use_demo.tools import ComputerTool20250124
 import logging
 
 # Set up logging
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 async def run_commands(commands):
     # Initialize tools
-    computer = ComputerTool()
+    computer = ComputerTool20250124()
     
     # execute commands        
     logger.info(f"Read Commands: {commands}")

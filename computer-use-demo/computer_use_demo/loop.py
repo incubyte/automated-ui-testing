@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, cast
+from tools import ComputerTool20250124, BashTool20250124, EditTool20250728
 import logging
 
 # Set up logging
@@ -48,6 +49,7 @@ from .tools import (
 )
 
 PROMPT_CACHING_BETA_FLAG = "prompt-caching-2024-07-31"
+COMPUTER_USE_BETA_FLAG = "computer-use-2025-01-24"
 
 
 class APIProvider(StrEnum):
@@ -270,7 +272,11 @@ def _response_to_params(
                 res.append(cast(BetaContentBlockParam, thinking_block))
         else:
             # Handle tool use blocks normally
-            res.append(cast(BetaToolUseBlockParam, block.model_dump()))
+            tool_call = cast(BetaToolUseBlockParam, block.model_dump())
+            # if tool_call has attr caller then remove it
+            if "caller" in tool_call:
+                del tool_call["caller"]
+            res.append(tool_call)
     return res
 
 
@@ -421,9 +427,9 @@ async def running_test_cases(
     Agentic sampling loop for the assistant/tool interaction of computer use.
     """
     tool_collection = ToolCollection(
-        ComputerTool(),
-        BashTool(),
-        EditTool(),
+        ComputerTool20250124(),
+        BashTool20250124(),
+        EditTool20250728(),
     )
     system = BetaTextBlockParam(
         type="text",
@@ -467,6 +473,7 @@ async def running_test_cases(
         # implementation may be able call the SDK directly with:
         # `response = client.messages.create(...)` instead.
         try:
+            # logger.info(f"Calling API with messages: {messages}")
             raw_response = client.beta.messages.with_raw_response.create(
                 max_tokens=max_tokens,
                 messages=messages,
@@ -499,15 +506,20 @@ async def running_test_cases(
         tool_result_content: list[BetaToolResultBlockParam] = []
         for content_block in response_params:
             output_callback(content_block)
-            if content_block["type"] == "tool_use":
+            if (
+                isinstance(content_block, dict)
+                and content_block.get("type") == "tool_use"
+            ):
+                # Type narrowing for tool use blocks
+                tool_use_block = cast(BetaToolUseBlockParam, content_block)
                 result = await tool_collection.run(
-                    name=content_block["name"],
-                    tool_input=cast(dict[str, Any], content_block["input"]),
+                    name=tool_use_block["name"],
+                    tool_input=cast(dict[str, Any], tool_use_block.get("input", {})),
                 )
                 tool_result_content.append(
-                    _make_api_tool_result(result, content_block["id"])
+                    _make_api_tool_result(result, tool_use_block["id"])
                 )
-                tool_output_callback(result, content_block["id"])
+                tool_output_callback(result, tool_use_block["id"])
 
         if not tool_result_content:
             return messages
@@ -524,16 +536,21 @@ async def _execute_tool_use_blocks(messages, output_callback, tool_output_callba
                 tool_result_content: list[BetaToolResultBlockParam] = []
                 for content_block in content:
                     output_callback(content_block)
-                    if content_block["type"] == "tool_use":
-                        logger.info(f"Running tool command: {content_block['name']} with input: {content_block['input']}")
+                    if (
+                        isinstance(content_block, dict)
+                        and content_block.get("type") == "tool_use"
+                    ):
+                        # Type narrowing for tool use blocks
+                        tool_use_block = cast(BetaToolUseBlockParam, content_block)
+                        # logger.info(f"Running tool command: {content_block['name']} with input: {content_block['input']}")
                         result = await tool_collection.run(
-                            name=content_block["name"],
-                            tool_input=cast(dict[str, Any], content_block["input"]),
+                            name=tool_use_block["name"],
+                            tool_input=cast(dict[str, Any], tool_use_block.get("input", {})),
                         )
                         tool_result_content.append(
-                            _make_api_tool_result(result, content_block["id"])
+                            _make_api_tool_result(result, tool_use_block["id"])
                         )
-                        tool_output_callback(result, content_block["id"])
+                        tool_output_callback(result, tool_use_block["id"])
 
     logger.info("Tool use blocks executed successfully with the following results:")
     # logger.info(tool_result_content)   
